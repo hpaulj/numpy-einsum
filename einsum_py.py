@@ -3,24 +3,35 @@ import numpy as np
 ast = np.lib.stride_tricks.as_strided
 
 class Labels(object):
-    def __init__(self, ndims):
-        self.ndims = ndims
-        self.nop = len(ndims)
+    def __init__(self, ops):
+        if len(ops)>0 and hasattr(ops[0],'ndim'):
+            # save data about ops, but not the ops themselves
+            ndims = [op.ndim for op in ops]
+            self.ndims = ndims # dimensions of the ops
+            self.nop = len(ndims)
+            self.shapes = [op.shape for op in ops]
+            self.strides = [op.strides for op in ops]
+        else:
+            ndims = ops
+            self.ndims = ndims # dimensions of the ops
+            self.nop = len(ndims)
+            self.shapes = []
+            self.strides = []
         self.counts = {}
         self.num_labels = 0
         self.min_label = ord('z')
         self.max_label = ord('a')
         self.ndim_broadcast = 0
 
-def parse_operand_subscripts(labelstr, astr, ndim):
+def parse_operand_subscripts(labelstr, subscripts, ndim):
     # for one operand with dimension, ndim
     idim = ndim-1
-    length = len(astr)
+    length = len(subscripts)
     labels = [-1 for i in range(ndim)]
     left_labels, right_labels, ellipsis = False, False, False
     i = 0
     for i in range(length-1, -1, -1):
-        label = astr[i]
+        label = subscripts[i]
 
         if label.isalpha():
             label = ord(label)
@@ -39,7 +50,7 @@ def parse_operand_subscripts(labelstr, astr, ndim):
             else:
                 raise ValueError('too many subscripts 1')
         elif label == '.':
-            if i>=2 and astr[i-1]=='.' and astr[i-2]=='.':
+            if i>=2 and subscripts[i-1]=='.' and subscripts[i-2]=='.':
                 ellipsis = True
                 length = i-2
                 break
@@ -52,10 +63,10 @@ def parse_operand_subscripts(labelstr, astr, ndim):
     ndim_left = idim+1
     #print ndim_left, length, i
     idim = 0
-    #print astr, labels, self.counts, ellipsis, chr(min_label), chr(max_label),i
+    #print subscripts, labels, self.counts, ellipsis, chr(min_label), chr(max_label),i
     if i>0:
         for i in range(length):
-            label = astr[i]
+            label = subscripts[i]
             if label.isalpha():
                 if idim<ndim_left:
                     label = ord(label)
@@ -97,17 +108,17 @@ def parse_operand_subscripts(labelstr, astr, ndim):
     elif not left_labels: broadcast = 'RIGHT'  # c has !labels_left
     else: broadcast = 'LEFT'
     assert ndim==len(labels)
-    return astr, labels, broadcast
+    return subscripts, labels, broadcast
 
-def parse_output_subscripts(labelstr, astr):
+def parse_output_subscripts(labelstr, subscripts):
     # Count the labels, making sure they're all unique and valid
-    length = len(astr)
+    length = len(subscripts)
     nlabels = 0
     for i in range(length):
-        label = astr[i]
+        label = subscripts[i]
         if label.isalpha():
             # check if occurs again
-            if astr.count(label)>1:
+            if subscripts.count(label)>1:
                 raise ValueError('output string contains label multiple times %s'%label)
             else:
                 if labelstr.counts.get(ord(label),None):
@@ -123,7 +134,7 @@ def parse_output_subscripts(labelstr, astr):
     # but with the above nlabels test, num labels, min, max is not affected
     # if main str is used; counts are uped though
     # error messages differ
-    args = parse_operand_subscripts(labelstr, astr, ndim)
+    args = parse_operand_subscripts(labelstr, subscripts, ndim)
     #print vars(labelstr)
     return args
 
@@ -142,20 +153,17 @@ def fake_outstr(labelstr):
     outstr = ''.join(outstr)
     return outstr
 
-def combine_dimensions(labelstr, label_list, ops_list, output_labels, ndim_output, debug=False):
-    # this creates new shape and strides for each op
-    # does this act on label_list labels, or ops (new view) or both?
-    # get_combined_dims_view
-    # op[iop] = op_in[iop]
-    # op[nop] = out
-    if len(ops_list)==0:
+def combine_dimensions(labelstr, label_list, output_labels, ndim_output, debug=False):
+    # return new shape and strides for each op
+    if len(labelstr.shapes)==0: # len(ops_list)==0:
         return None
     if labelstr.nop==1:
         # if out is None
         # try remapping the axes to the output to return
         # a view instead of a copy.
         # how do I check for the out kwarg?
-        ret = get_single_op_view(labelstr.ndims[0], label_list[0], ops_list[0], output_labels, ndim_output, debug=debug)
+        ret = get_single_op_view(labelstr.ndims[0], label_list[0],
+            labelstr.shapes[0], labelstr.strides[0], output_labels, ndim_output, debug=debug)
         if ret is None:
             # return ret
             pass # could not return a view
@@ -165,7 +173,9 @@ def combine_dimensions(labelstr, label_list, ops_list, output_labels, ndim_outpu
             return True
     combine_list = []
     for iop in range(labelstr.nop):
-        op_shape, op_strides = ops_list[iop]
+        # op_shape, op_strides = ops_list[iop]
+        op_shape = labelstr.shapes[iop]
+        op_strides = labelstr.strides[iop]
         ndim = labelstr.ndims[iop]
         labels = label_list[iop][1]
         combine = any(l<0 for l in labels)
@@ -174,7 +184,7 @@ def combine_dimensions(labelstr, label_list, ops_list, output_labels, ndim_outpu
             if debug: print 'try to combine, iop %s'%iop
             # get_combined_dims_view()
             new_strides = [0 for l in range(ndim)]
-            new_dims = [0 for l in range(ndim)]
+            new_shape = [0 for l in range(ndim)]
             icombinemap = [0 for l in range(ndim)]
             icombine = 0
             # Copy the dimensions and strides, except when collapsing
@@ -190,22 +200,22 @@ def combine_dimensions(labelstr, label_list, ops_list, output_labels, ndim_outpu
                     icombinemap[idim] = icombine
                 # If the label is 0, it's an unlabeled broadcast dimension
                 if label==0:
-                    new_dims[icombine] = op_shape[idim]
+                    new_shape[icombine] = op_shape[idim]
                     new_strides[icombine] = op_strides[idim]
                 else:
                     # Update the combined axis dimensions and strides
                     i = idim + combineoffset
-                    if combineoffset<0 and new_dims[i]!=op_shape[idim]:
+                    if combineoffset<0 and new_shape[i]!=op_shape[idim]:
                         raise ValueError("dimensions in operand %d for collapsing ")
                     i = icombinemap[i]
-                    new_dims[i] = op_shape[idim]
+                    new_shape[i] = op_shape[idim]
                     new_strides[i] += op_strides[idim]
                 # If the label didn't say to combine axes, increment dest i
                 if combineoffset==0:
                     icombine += 1
             # compressed number of dimensions
             ndim = icombine
-            ret = (new_dims[:ndim], new_strides[:ndim])
+            ret = (new_shape[:ndim], new_strides[:ndim])
             # C returns new array with these
             combine_list.append(ret)
         else:
@@ -216,13 +226,15 @@ def combine_dimensions(labelstr, label_list, ops_list, output_labels, ndim_outpu
     labelstr.combine_list = combine_list
     return True
 
-def get_single_op_view(ndim, label_tpl, op, output_labels, ndim_output, debug=False):
+def get_single_op_view(ndim, label_tpl, op_shape, op_strides, output_labels, ndim_output, debug=False):
+    # labelstr.ndims[0], label_list[0], [labelstr.shapes[0], labelstr.strides[0]], output_labels, ndim_output, debug=debug
     # get a view for a single op
+    # how does this differ from combine_dimensions operations for one op?
 
-    astr, labels, broadcast = label_tpl
-    new_dims = [0 for i in range(ndim_output)]
+    subscripts, labels, broadcast = label_tpl
+    new_shape = [0 for i in range(ndim_output)]
     new_strides = [0 for i in range(ndim_output)]
-    op_shape, op_strides = op
+    #op_shape, op_strides = op
     ibroadcast = 0
     fail = False
     for idim in range(ndim):
@@ -245,9 +257,9 @@ def get_single_op_view(ndim, label_tpl, op, output_labels, ndim_output, debug=Fa
             if ibroadcast == ndim_output:
                 raise ValueError("output had too few broadcast dimensions")
 
-            new_dims[ibroadcast] = op_shape[idim]
+            new_shape[ibroadcast] = op_shape[idim]
             new_strides[ibroadcast] = op_strides[idim]
-            if debug: print 'ibrd',ibroadcast, idim, new_dims, new_strides
+            if debug: print 'ibrd',ibroadcast, idim, new_shape, new_strides
             ibroadcast+=1
         else:
             # find position for the dimension in the output
@@ -258,24 +270,24 @@ def get_single_op_view(ndim, label_tpl, op, output_labels, ndim_output, debug=Fa
                 fail = True
                 break
             # Update the dimensions and strides of the output
-            if new_dims[ilabel] != 0 and new_dims[ilabel] != op_shape[idim]:
+            if new_shape[ilabel] != 0 and new_shape[ilabel] != op_shape[idim]:
                 raise ValueError("dimensions in operand %d for collapsing "+\
                         "index '%c' don't match (%d != %d)")
             if debug: print 'ilabel',ilabel,idim,label
-            new_dims[ilabel] = op_shape[idim]
+            new_shape[ilabel] = op_shape[idim]
             new_strides[ilabel] += op_strides[idim]
     # If we processed all the input axes, return a view
     if fail:
         if debug:
             print 'get view fail'
-            print new_dims, new_strides
+            print new_shape, new_strides
         return None
         # C returns 1, and ret=NULL; for errors returns 0
     else:
         # return parameters to generate new view
         if debug:
-            print 'new view', op_shape, op_strides, new_dims, new_strides
-        return new_dims, new_strides
+            print 'new view', op_shape, op_strides, new_shape, new_strides
+        return new_shape, new_strides
 
 def iterlabels(labelstr, output_labels, ndim_output):
     """
@@ -295,7 +307,7 @@ def iterlabels(labelstr, output_labels, ndim_output):
     return iter_labels
 
 def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
-    astr, labels, broadcast = args
+    subscripts, labels, broadcast = args
     axes = []
     if broadcast == 'RIGHT':
         ibroadcast = ndim-1
@@ -368,7 +380,7 @@ def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
     return axes
 
 def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
-    astr, labels, broadcast = args
+    subscripts, labels, broadcast = args
     axes = []
 
     # right; adds auto broadcast on left where it belongs
@@ -395,9 +407,9 @@ def prepare_out_axes(labelstr, ndim_output, ndim_iter):
     axes = range(ndim_output) + [-1]*(ndim_iter-ndim_output)
     return axes
 
-def parse_subscripts(subscripts, ndims, debug=True, ops_list=[], **kwargs):
+def parse_subscripts(subscripts, labelstr, debug=True, **kwargs):
     #
-    labelstr = Labels(ndims)
+    ndims = labelstr.ndims
     opstr = subscripts.split('->')
     if len(opstr)>1:
         opstr, outstr = opstr
@@ -406,8 +418,8 @@ def parse_subscripts(subscripts, ndims, debug=True, ops_list=[], **kwargs):
         outstr = None
     opstr = opstr.split(',')
     label_list = []
-    for astr, ndim in zip(opstr,ndims):
-        args = parse_operand_subscripts(labelstr, astr, ndim)
+    for subscripts, ndim in zip(opstr, ndims):
+        args = parse_operand_subscripts(labelstr, subscripts, ndim)
         label_list.append(args)
     labelstr.ndim_broadcast = count_broadcast(label_list)
     if outstr is None:
@@ -423,7 +435,7 @@ def parse_subscripts(subscripts, ndims, debug=True, ops_list=[], **kwargs):
         print label_list
         print argout
     # print parse_output_subscripts(labelstr, fake_outstr(labelstr))
-    ret = combine_dimensions(labelstr, label_list,ops_list,output_labels, ndim_output, debug=debug)
+    ret = combine_dimensions(labelstr, label_list, output_labels, ndim_output, debug=debug)
     if ret is not None:
         if hasattr(labelstr,'view'):
             if debug: print 'view', labelstr.view
@@ -454,64 +466,64 @@ def parse_subscripts(subscripts, ndims, debug=True, ops_list=[], **kwargs):
     xes = [a[1:] for a in op_axes]
     return labelstr, op_axes
 
-def mysum(ops, op_axes, order='K', debug=False, funs=[]):
-      nops = len(ops)
-      ops.append(None)
-      flags = ['reduce_ok','buffered', 'external_loop',
+def sum_of_prod(ops, op_axes, order='K', itdump=False, funs=[], **kwargs):
+    nop = len(ops)
+    ops.append(None)
+    flags = ['reduce_ok','buffered', 'external_loop',
              'delay_bufalloc', 'grow_inner',
              'zerosize_ok', 'refs_ok']
-      op_flags = [['readonly']]*nops + [['allocate','readwrite']]
+    op_flags = [['readonly']]*nop + [['allocate','readwrite']]
 
-      it = np.nditer(ops, flags, op_flags, op_axes=op_axes,
-            order=order)
-      it.operands[nops][...] = 0
-      it.reset()
-      cnt = 0
-      if debug:
-            it.debug_print()
-      if nops==1:
-            if funs:
-                # sum of squares or the like
-                for (x,w) in it:
-                    funs[0](funs[1](x,x), w, w)
-                    # w[...] += x*x
-                    cnt += 1
-            else:
-                # a sum without multiply?
-                for (x,w) in it:
-                    w[...] += x
-                    cnt += 1
-      elif nops==2:
-            if funs:
-                  assert nops==2
-                  for (x,y,w) in it:
-                        #np.add(np.multiply(x, y), w, out=w)
-                        funs[0](funs[1](x,y), w, w)
-                        cnt += 1
-            else:
-                  assert nops==2
-                  for (x,y,w) in it:
-                        w[...] += x*y
-                        cnt += 1
-      elif nops==3:
-            for (x,y,z,w) in it:
-                  w[...] += x*y*z
-                  cnt += 1
-      else:
-            raise Error
+    it = np.nditer(ops, flags, op_flags, op_axes=op_axes,
+        order=order)
+    it.operands[nop][...] = 0
+    it.reset()
+    cnt = 0
+    if itdump:
+        it.debug_print()
+    if nop==1:
+        if funs:
+            for (x,w) in it:
+                funs[0](x, w)
+                cnt += 1
+        else:
+            # a sum without multiply
+            for (x,w) in it:
+                w[...] += x
+                cnt += 1
+    elif nop==2:
+        if funs:
+            for (x,y,w) in it:
+                #np.add(np.multiply(x, y), w, out=w)
+                funs[0](funs[1](x,y), w, w)
+                cnt += 1
+        else:
+            for (x,y,w) in it:
+                w[...] += x*y
+                cnt += 1
+    elif nop==3:
+        if funs:
+            raise ValueError('generalized funs not implemented for nop 3')
+        for (x,y,z,w) in it:
+            w[...] += x*y*z
+            cnt += 1
+    else:
+        raise ValueError('calc for more than 3 nop not implemented')
 
-      if debug:
-            print 'cnt',cnt, x.shape
-      return it.operands[nops]
+    if itdump:
+        print 'cnt',cnt, x.shape
+    return it.operands[nop]
 
 
-def myeinsum(astr, *ops, **kwargs):
-    # debug = kwargs.get('debug', False)
-    kwargs.setdefault('debug',False)
+def myeinsum(subscripts, *ops, **kwargs):
+    # dropin preplacement for np.einsum (more or less)
+    kwargs.setdefault('debug', False)
     ops = [np.array(x) for x in ops]
-    dims = [x.ndim for x in ops]
-    kwargs.setdefault('ops_list',[(op.shape, op.strides) for op in ops])
-    label_str, op_axes = parse_subscripts(astr, dims, **kwargs)
+    # ndims = [x.ndim for x in ops]
+    # kwargs.setdefault('ops_list', [(op.shape, op.strides) for op in ops])
+    label_str = Labels(ops)
+    #print vars(label_str)
+    label_str, op_axes = parse_subscripts(subscripts, label_str, **kwargs)
     if hasattr(label_str, 'view'):
         view = label_str.view
         x = ast(ops[0], shape=view[0], strides=view[1])
@@ -525,11 +537,9 @@ def myeinsum(astr, *ops, **kwargs):
                 new_shape, new_strides = clist[i]
                 ops1[i] = ast(ops[i], shape=new_shape, strides=new_strides)
                 print 'combined',ops[i].shape,'=>',ops1[i].shape
-        # op_axes need to be adjusted to reflect new shape
-        # mysum for nops=1 needs to do sum of right axis
-        x = mysum(ops1, op_axes)
+        x = sum_of_prod(ops1, op_axes, **kwargs)
     else:
-        x = mysum(ops, op_axes)
+        x = sum_of_prod(ops, op_axes, **kwargs)
     if kwargs.has_key('out'):
         kwargs['out'][...] = x
     return x
@@ -554,10 +564,8 @@ if __name__ == '__main__':
             ('ik,k...->i...',[2,2]),
         ]
         for s,n in trials:
-            parse_subscripts(s,n)
+            parse_subscripts(s, Labels(n))
             print ''
-
-        #from numpy_hub2455 import mysum
 
         print '\n-----------------'
         A = np.arange(12).reshape((4,3))
@@ -569,65 +577,80 @@ if __name__ == '__main__':
         np.einsum('ik...,...kj->i...j', A, B)
         print 'add(multiply())'
         funs = [np.add, np.multiply]
-        print mysum([A,B],[[0,1,-1],[-1,0,1], [0,-1,1]], funs=funs)
+        print sum_of_prod([A,B],[[0,1,-1],[-1,0,1], [0,-1,1]], funs=funs)
 
-        label_str, op_axes = parse_subscripts('ik,kj->ij', [A.ndim,B.ndim])
+        label_str, op_axes = parse_subscripts('ik,kj->ij', Labels([A.ndim,B.ndim]))
         print op_axes
         # [[0, -1, 1], [-1, 1, 0], [0, 1, -1]]  fine
         # map (4,newaxis,3)(newaxis,3,2)->(4,2,newaxis)
-        print mysum([A,B],op_axes)
+        print sum_of_prod([A,B],op_axes)
 
-        label_str, op_axes = parse_subscripts('ik...,k...->i...', [A.ndim,B.ndim])
+        label_str, op_axes = parse_subscripts('ik...,k...->i...', Labels([A.ndim,B.ndim]))
         print op_axes
         # correct with left/right switch
-        print mysum([A,B],op_axes)
+        print sum_of_prod([A,B],op_axes)
 
-        label_str, op_axes = parse_subscripts('ik...,...kj->i...j', [A.ndim,B.ndim])
+        label_str, op_axes = parse_subscripts('ik...,...kj->i...j', Labels([A.ndim,B.ndim]))
         print op_axes
         # [[0, -1, 1], [0, 1, -1], [0, 1, -1]]
-        print mysum([A,B],op_axes)
+        print sum_of_prod([A,B],op_axes)
         # correct with l/r switch
 
-        label_str, op_axes = parse_subscripts('ik,k...->i...', [A.ndim,B.ndim])
+        label_str, op_axes = parse_subscripts('ik,k...->i...', Labels([A.ndim,B.ndim]))
         print op_axes
-        print mysum([A,B],op_axes)
+        print sum_of_prod([A,B],op_axes)
+
+        # 'ik,k...->i...' np.einsum error
+        # 'ik,kj->ij'  #ok
+        # 'ik...,k...->i...' #ok
+        # 'ik...,...kj->i...j'
+        # print myeinsum('ik,kj->ij', A, B)
+        print 'add(multiply())'
+        funs = [np.add, np.multiply]
+        print myeinsum('ik,kj->ij', A, B, funs=funs)
+        print 'maximum(add())'
+        funs = [np.maximum, np.add]
+        print myeinsum('ik,kj->ij', A, B, funs=funs)
+
 
         # - how to account for l/r switch
         # - how get last case work
 
     if True:
+        print '\nprefactor, dipoles'
         N, M, O = 160, 160, 128
         N,M,O = 16,16,12
         prefactor = np.random.random((1, 1, 1, M, N, O))
         dipoles = np.random.random((M, N, O, 3))
-        astr = '...lmn,...lmno->...o'
-        astr = 'abclmn,lmno->abco'
-        print astr
-        x = np.einsum(astr, prefactor, dipoles)
+        subscripts = '...lmn,...lmno->...o'
+        subscripts = 'abclmn,lmno->abco'
+        print subscripts
+        x = np.einsum(subscripts, prefactor, dipoles)
         print x.shape
-        label_str, op_axes = parse_subscripts(astr, [prefactor.ndim,dipoles.ndim])
+        label_str, op_axes = parse_subscripts(subscripts, Labels([prefactor.ndim,dipoles.ndim]))
         #print op_axes
-        x = mysum([prefactor,dipoles],op_axes)
+        x = sum_of_prod([prefactor,dipoles],op_axes)
         print x.shape
 
         print ''
-        astr = '...bclmn,...lmno->...bco'
-        astr = '...lmn,...lmno->...o'
-        astr = '...lmn,lmno->...o'
-        #astr = 'lmn,lmno->...o'
-        print astr
+        subscripts = '...bclmn,...lmno->...bco'
+        subscripts = '...lmn,...lmno->...o'
+        subscripts = '...lmn,lmno->...o'
+        #subscripts = 'lmn,lmno->...o'
+        print subscripts
         try:
-            x = np.einsum(astr, prefactor, dipoles)
+            x = np.einsum(subscripts, prefactor, dipoles)
             print x.shape
+            print 'einsum correct with %r'%subscripts
         except ValueError:
-            print 'einsum error'
+            print 'einsum error with %r'%subscripts
             pass
         """
-        label_str, op_axes = parse_subscripts(astr, [prefactor.ndim,dipoles.ndim])
+        label_str, op_axes = parse_subscripts(subscripts, [prefactor.ndim,dipoles.ndim])
         #print op_axes
-        x = mysum([prefactor,dipoles],op_axes)
+        x = sum_of_prod([prefactor,dipoles],op_axes)
         """
-        x = myeinsum(astr, prefactor, dipoles)
+        x = myeinsum(subscripts, prefactor, dipoles)
         print x.shape
 
     if True:
@@ -643,8 +666,11 @@ if __name__ == '__main__':
         print
         a = np.arange(2*3).reshape(2,3)
         b = np.arange(2*3*4).reshape(2,3,4)
-        #c = np.einsum("ij, ij...->ij...", a, b) # cnnot extend
-        #print c.shape
+        try:
+            c = np.einsum("ij, ij...->ij...", a, b) # cnnot extend
+            print c.shape, 'with %r'%"ij, ij...->ij..."
+        except ValueError:
+            print 'einsum error with %r'%"ij, ij...->ij..."
         #c = myeinsum("..., ...", a, b,debug=True) # tries to add dim at start
         c = myeinsum("ij, ij...->ij...", a, b,debug=True)
         print c.shape
@@ -654,11 +680,16 @@ if __name__ == '__main__':
         a = np.arange(np.prod(dims)).reshape(dims)
         v = np.arange(dims[2])
         print myeinsum('ijkl,k->ijl',a,v).shape
+        print myeinsum('ijkl,k',a,v).shape
         print myeinsum('...kl,k',a,v).shape  # np.einsum xxx
         print myeinsum('...kl,k...',a,v).shape
         print np.einsum('ijkl,k->ijl',a,v).shape
         print np.einsum('...kl,...k',a,v).shape
         print np.einsum('...kl,k...',a,v).shape
+        try:
+            print np.einsum('...kl,k',a,v).shape
+        except ValueError:
+            print 'np.einsum ValueError with %r'%'...kl,k'
         # does not matter which side the ... is on
         # myeinsum does not have the broadcast error objection
 
@@ -725,3 +756,10 @@ if __name__ == '__main__':
         assert s == s2
         print myeinsum('ijij',x,debug=True)
 
+    if True:
+        n = 1; dtype = np.int32
+        a = np.arange(3*n, dtype=dtype).reshape(3,n)
+        b = np.arange(2*3*n, dtype=dtype).reshape(2,3,n)
+        print myeinsum("..., ...", a, b,debug=True)
+        print np.multiply(a, b)
+        print np.einsum("..., ...", a, b)
