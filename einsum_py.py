@@ -306,7 +306,7 @@ def iterlabels(labelstr, output_labels, ndim_output):
     # may have 0 in iter_labels
     return iter_labels
 
-def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
+def prepare_op_axes_original(labelstr, args, ndim, iter_labels, ndim_iter):
     subscripts, labels, broadcast = args
     axes = []
     if broadcast == 'RIGHT':
@@ -359,11 +359,11 @@ def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
                 while ibroadcast < ndim and labels[ibroadcast] !=0:
                     ibroadcast += 1
                 if ibroadcast>=ndim:
-                    if True: # empty 'broadcast'
+                    if False: # empty 'broadcast'
                         axes.append(-1)
                         ibroadcast += 1
                     else:
-                        # when shouldn't we do broadcast?
+                        # default error msg
                         raise ValueError('cant middle broadcast %s %s'%(ndim, ibroadcast))
                 else:
                     axes.append(ibroadcast)
@@ -379,7 +379,7 @@ def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
         raise ValueError( 'unknown broadcast')
     return axes
 
-def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
+def prepare_op_axes_right(labelstr, args, ndim, iter_labels, ndim_iter):
     subscripts, labels, broadcast = args
     axes = []
 
@@ -402,6 +402,33 @@ def prepare_op_axes(labelstr, args, ndim, iter_labels, ndim_iter):
             except ValueError:
                 axes.insert(0,-1)
     return axes
+
+def prepare_op_axes_left(labelstr, args, ndim, iter_labels, ndim_iter):
+    subscripts, labels, broadcast = args
+    axes = []
+
+    ibroadcast = 0
+    #for i in range(ndim_iter):
+    #    label = iter_labels[i]
+    for label in iter_labels:
+        if label==0:
+            while ibroadcast < ndim and labels[ibroadcast] !=0:
+                ibroadcast += 1
+            if ibroadcast>=ndim:
+                axes.append(-1)
+            else:
+                axes.append(ibroadcast)
+                ibroadcast += 1
+        else:
+            try:
+                match = labels.index(label)
+                axes.append(match)
+            except ValueError:
+                axes.append(-1)
+    return axes
+
+prepare_op_axes = prepare_op_axes_right
+
 
 def prepare_out_axes(labelstr, ndim_output, ndim_iter):
     axes = range(ndim_output) + [-1]*(ndim_iter-ndim_output)
@@ -546,7 +573,7 @@ def myeinsum(subscripts, *ops, **kwargs):
 
 if __name__ == '__main__':
 
-    if True:
+    if False:
         trials = [
             ('ij...,...kj->i...k', [2,2]),
             ('ij...,...kj->...ik', [2,2]),
@@ -564,6 +591,7 @@ if __name__ == '__main__':
             ('ik,k...->i...',[2,2]),
         ]
         for s,n in trials:
+            print s
             parse_subscripts(s, Labels(n))
             print ''
 
@@ -617,6 +645,7 @@ if __name__ == '__main__':
         # - how get last case work
 
     if True:
+
         print '\nprefactor, dipoles'
         N, M, O = 160, 160, 128
         N,M,O = 16,16,12
@@ -654,6 +683,7 @@ if __name__ == '__main__':
         print x.shape
 
     if True:
+
         print
         dtype='int32'; n =4
         a = np.arange(3*n, dtype=dtype).reshape(3,n)
@@ -694,6 +724,7 @@ if __name__ == '__main__':
         # myeinsum does not have the broadcast error objection
 
     if True:
+
         print '\nviews'
         a = np.arange(9).reshape(3,3)
         b = myeinsum("ii->i", a,debug=True)
@@ -757,9 +788,35 @@ if __name__ == '__main__':
         print myeinsum('ijij',x,debug=True)
 
     if True:
+        prepare_op_axes = prepare_op_axes_right
+        # this case gives error if BROADCAST_LEFT is used instead of RIGHT
+        # (3,1) (2,3,1)
+        # target:
+        # op_axes [[-1, 0, 1], [0, 1, 2], [0, 1, 2]]
+        # makes (newaxis,3,1)
+        # wrong with 'right'
+        # op_axes [[0, 1, -1], [0, 1, 2], [0, 1, 2]]
+        # makes (3,1,newaxis)
         n = 1; dtype = np.int32
         a = np.arange(3*n, dtype=dtype).reshape(3,n)
         b = np.arange(2*3*n, dtype=dtype).reshape(2,3,n)
-        print myeinsum("..., ...", a, b,debug=True)
+        astr = '..., ...'
+        print myeinsum(astr, a, b,debug=True)
         print np.multiply(a, b)
-        print np.einsum("..., ...", a, b)
+        print np.einsum(astr, a, b)
+        print np.einsum(astr, a, b).shape
+
+        print '\n'
+        prepare_op_axes = prepare_op_axes_right
+        a = np.arange(3*2).reshape(2,3)
+        astr = '..., ...'   # both 'right' broadcast type; fails both with original and right
+        #astr = 'ij, ijk ->ijk'
+        #astr = 'ij, ij...->ij...' # fails 'original'
+        #astr = 'ij...,ijk->ijk'  # explicit broadcast
+        #astr = '...ij,ijk->ijk' # also ok
+        # op_axes [[-1, 0, 1], [0, 1, 2], [0, 1, 2]] right
+        # sumofprod error, fail broadcast
+        # op_axes [[0, 1, -1], [0, 1, 2], [0, 1, 2]] left, correct
+        print myeinsum(astr, a, b,debug=True) # cannot broadcast with 'right'; ok with left
+        print np.multiply(a[...,None], b)
+        print np.einsum(astr, a, b)
