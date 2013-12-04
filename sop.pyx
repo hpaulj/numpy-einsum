@@ -3,9 +3,12 @@ cimport numpy as np
 cimport cython
 
 def sum_of_prod(ops, op_axes, order='K', itdump=False, **kwargs):
+    cdef int nop
     nop = len(ops)
     if nop==2:
         return sum_product_cy(ops, op_axes, order=order)
+    if nop==3:
+        return sum_product_cy3(ops, op_axes, order=order)
     ops.append(None)
     flags = ['reduce_ok','buffered', 'external_loop',
              'delay_bufalloc', 'grow_inner',
@@ -72,8 +75,47 @@ def sum_product_cy(ops, op_axes, order='K'):
         w = warr
         size = x.shape[0]
         for i in range(size):
-           value = x[i]
            w[i] = w[i] + x[i] * y[i]
+    return it.operands[nop]
+
+@cython.boundscheck(False)
+def sum_product_cy3(ops, op_axes, order='K'):
+    #(arr, axis=None, out=None):
+    cdef np.ndarray[double] x
+    cdef np.ndarray[double] y
+    cdef np.ndarray[double] z
+    cdef np.ndarray[double] w
+    cdef int size
+    cdef int nop
+
+    nop = len(ops)
+    ops.append(None)
+
+    """
+    axeslist = axis_to_axeslist(axis, arr.ndim)
+    it = np.nditer([arr, out], flags=['reduce_ok', 'external_loop',
+                                      'buffered', 'delay_bufalloc'],
+                op_flags=[['readonly'], ['readwrite', 'allocate']],
+                op_axes=[None, axeslist],
+                op_dtypes=['float64', 'float64'])
+    """
+
+    flags = ['reduce_ok','buffered', 'external_loop',
+             'delay_bufalloc', 'grow_inner',
+             'zerosize_ok', 'refs_ok']
+    op_flags = [['readonly']]*nop + [['allocate','readwrite']]
+
+    it = np.nditer(ops, flags, op_flags, op_axes=op_axes, order=order)
+    it.operands[nop][...] = 0
+    it.reset()
+    for xarr, yarr, zarr, warr in it:
+        x = xarr
+        y = yarr
+        z = zarr
+        w = warr
+        size = x.shape[0]
+        for i in range(size):
+           w[i] = w[i] + x[i] * y[i] * z[i]
     return it.operands[nop]
 
 """

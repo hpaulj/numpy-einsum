@@ -810,13 +810,16 @@ if __name__ == '__main__':
         prepare_op_axes = prepare_op_axes_right
         a = np.arange(3*2).reshape(2,3)
         astr = '..., ...'   # both 'right' broadcast type; fails both with original and right
-        #astr = 'ij, ijk ->ijk'
-        #astr = 'ij, ij...->ij...' # fails 'original'
+        astr = 'ij, ijk ->ijk'
+        astr = 'ij, ij...->ij...' # fails 'original'
         #astr = 'ij...,ijk->ijk'  # explicit broadcast
         #astr = '...ij,ijk->ijk' # also ok
         # op_axes [[-1, 0, 1], [0, 1, 2], [0, 1, 2]] right
         # sumofprod error, fail broadcast
         # op_axes [[0, 1, -1], [0, 1, 2], [0, 1, 2]] left, correct
-        print myeinsum(astr, a, b,debug=True) # cannot broadcast with 'right'; ok with left
+        try:
+            print myeinsum(astr, a, b,debug=True) # cannot broadcast with 'right'; ok with left
+        except ValueError as e:
+            print 'ValueError: ', e
         print np.multiply(a[...,None], b)
         print np.einsum(astr, a, b)
